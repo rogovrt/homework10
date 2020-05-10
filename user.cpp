@@ -9,6 +9,7 @@
 #include <thread>
 #include <chrono>
 #include <ctime>
+#include <atomic>
 #include <iterator>
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/managed_shared_memory.hpp>
@@ -23,13 +24,12 @@
 using char_allocator = boost::interprocess::allocator <char, boost::interprocess::managed_shared_memory::segment_manager>;
 using char_string = boost::interprocess::basic_string <char, std::char_traits <char>, char_allocator>;
 using string_allocator = boost::interprocess::allocator <char_string, boost::interprocess::managed_shared_memory::segment_manager>;
-using int_allocator = boost::interprocess::allocator <int, boost::interprocess::managed_shared_memory::segment_manager>;
 using map_value = std::pair <const int, char_string>;
 using map_value_allocator = boost::interprocess::allocator <map_value, boost::interprocess::managed_shared_memory::segment_manager>;
 using map_type = boost::interprocess::map <int, char_string, std::less<int>, map_value_allocator>;
 
-int last_in_local = -1;
-bool b = true;
+std::atomic_int last_in_local = -1;
+std::atomic_bool b = true;
 
 
 void print_map(map_type* data) {
@@ -38,14 +38,14 @@ void print_map(map_type* data) {
 }
 
 void wait_block(boost::interprocess::interprocess_condition* condition, boost::interprocess::interprocess_mutex* mutex,
-	map_type* data, int* last_in, char_allocator ca, int* num_of_users) {
-	while (b != false)
+	map_type* data, int* last_in, int* num_of_users) {
+	while (!b)
 	{
 		std::unique_lock <boost::interprocess::interprocess_mutex> lock(*mutex);
 		condition->wait(lock, [&data, &last_in] {
 			return (last_in_local != *last_in);
 		});
-		if (b == true) {
+		if (b) {
 			for (int i = 0; i < *last_in - last_in_local; ++i)
 				std::cout << "new message: " << std::next(data->crbegin(), i)->second << std::endl;
 			last_in_local = *last_in;
@@ -57,7 +57,8 @@ void wait_block(boost::interprocess::interprocess_condition* condition, boost::i
 }
 
 void write_block(boost::interprocess::interprocess_condition* condition, boost::interprocess::interprocess_mutex* mutex,
-	map_type* data, int* last_in, char_allocator ca) {
+	map_type* data, int* last_in, boost::interprocess::managed_shared_memory::segment_manager* sg) {
+	char_allocator ca(sg);
 	char_string val(ca);
 	val = "empty";
 	while (val != "EXIT") {
@@ -66,7 +67,7 @@ void write_block(boost::interprocess::interprocess_condition* condition, boost::
 			std::scoped_lock <boost::interprocess::interprocess_mutex> lock(*mutex);
 			++(*last_in);
 			last_in_local = *last_in;
-			data->insert(std::pair<int, char_string>(*last_in, val));
+			data->insert(std::make_pair(*last_in, val));
 		}
 		if (val == "EXIT") {
 			b = false;
@@ -95,8 +96,8 @@ int main() {
 
 	char_allocator ca(shared_memory.get_segment_manager());
 	++(*num_of_users);
-	std::thread t(wait_block, std::ref(condition), std::ref(mutex), std::ref(data), std::ref(last_in), ca, std::ref(num_of_users));
-	std::thread t1(write_block, std::ref(condition), std::ref(mutex), std::ref(data), std::ref(last_in), ca);
+	std::thread t(wait_block, std::ref(condition), std::ref(mutex), std::ref(data), std::ref(last_in), std::ref(num_of_users));
+	std::thread t1(write_block, std::ref(condition), std::ref(mutex), std::ref(data), std::ref(last_in), shared_memory.get_segment_manager());
 	t.join();
 	t1.join();
 
